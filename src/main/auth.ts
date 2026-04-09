@@ -5,16 +5,8 @@ export interface SlackCredentials {
   cookie: string
 }
 
-// Spoof a modern Chrome UA — prevents Slack's "browser not supported" warning
-// and ensures Slack serves the full web client without restrictions.
-const MODERN_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-
 export async function openAuthWindow(): Promise<SlackCredentials | null> {
   const authSession = electronSession.fromPartition('persist:slack-auth')
-
-  // Apply the modern UA to all requests in this session
-  authSession.setUserAgent(MODERN_UA)
 
   const win = new BrowserWindow({
     width: 960,
