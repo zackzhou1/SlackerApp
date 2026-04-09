@@ -7,6 +7,10 @@ import { startViewerServer, stopViewerServer } from './server'
 
 let mainWindow: BrowserWindow | null = null
 let extractWorker: Worker | null = null
+let downloadWorker: Worker | null = null
+
+// Cache for Slack channels list (avoids re-fetching from API on every open)
+let channelsCache: { channels: { id: string; name: string; type: string }[] } | null = null
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -79,6 +83,7 @@ function registerIpc(): void {
 
   ipcMain.handle('auth:disconnect', () => {
     clearCredentials()
+    channelsCache = null
     return { success: true }
   })
 
@@ -129,6 +134,8 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('channels:list', async () => {
+    if (channelsCache) return channelsCache
+
     const creds = loadCredentials()
     if (!creds) return { error: 'Not connected' }
 
@@ -178,10 +185,61 @@ function registerIpc(): void {
       }
 
       if (channels.length === 0) return { error: 'No channels found. Your token may have expired — try reconnecting.' }
-      return { channels }
+      channelsCache = { channels }
+      return channelsCache
     } catch (e) {
       return { error: String(e) }
     }
+  })
+
+  ipcMain.handle('channels:refresh', () => {
+    channelsCache = null
+    return { ok: true }
+  })
+
+  // File download ---------------------------------------------------------------
+
+  ipcMain.handle('files:start-download', (_event, opts: { channelFilter?: string } = {}) => {
+    if (downloadWorker) return { error: 'Already downloading' }
+
+    const creds = loadCredentials()
+    if (!creds) return { error: 'No credentials saved.' }
+
+    const dbPath = getDbPath()
+    const downloadsDir = join(app.getPath('userData'), 'downloads')
+
+    downloadWorker = new Worker(join(__dirname, 'download-worker.js'), {
+      workerData: {
+        token: creds.token,
+        cookie: creds.cookie,
+        dbPath,
+        downloadsDir,
+        channelFilter: opts.channelFilter
+      }
+    })
+
+    downloadWorker.on('message', (event) => {
+      mainWindow?.webContents.send('files:progress', event)
+      const type = (event as { type: string }).type
+      if (type === 'done' || type === 'stopped' || type === 'error') {
+        downloadWorker?.terminate()
+        downloadWorker = null
+      }
+    })
+
+    downloadWorker.on('error', (err) => {
+      mainWindow?.webContents.send('files:progress', { type: 'error', message: err.message })
+      downloadWorker = null
+    })
+
+    downloadWorker.on('exit', () => { downloadWorker = null })
+
+    return { started: true, downloadsDir }
+  })
+
+  ipcMain.handle('files:stop-download', () => {
+    downloadWorker?.postMessage('stop')
+    return { ok: true }
   })
 
   // Viewer --------------------------------------------------------------------

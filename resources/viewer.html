@@ -112,8 +112,10 @@
     .channel-item:hover { background: var(--sidebar-hover); color: var(--sidebar-accent); }
     .channel-item.active { background: var(--sidebar-active); color: var(--sidebar-accent); font-weight: 600; }
     .channel-item.archived { opacity: 0.45; }
-    .ch-icon { font-size: 15px; flex-shrink: 0; color: var(--muted); }
+    .ch-icon { font-size: 13px; flex-shrink: 0; color: var(--muted); }
     .channel-item.active .ch-icon, .channel-item:hover .ch-icon { color: inherit; }
+    .private-ch .ch-icon { font-size: 11px; }
+    mark { background: #4a3a1a; color: #f0c040; border-radius: 2px; padding: 0 1px; font-style: normal; }
     .ch-name { overflow: hidden; text-overflow: ellipsis; flex: 1; }
     .ch-count { font-size: 11px; color: var(--muted); flex-shrink: 0; }
 
@@ -516,9 +518,10 @@ async function loadChannels() {
 }
 
 function channelItem(c) {
-  const icon = c.type === 'im' ? '◎' : c.type === 'mpim' ? '◉' : c.type === 'group' ? '🔒' : '#';
+  const icon = c.type === 'im' ? '●' : c.type === 'mpim' ? '◉' : c.type === 'group' ? '⊛' : '#';
   const archived = c.is_archived ? ' archived' : '';
-  return `<div class="channel-item${archived}" data-id="${c.id}" data-name="${escAttr(c.name)}" data-type="${c.type}">
+  const privateClass = c.type === 'group' ? ' private-ch' : '';
+  return `<div class="channel-item${archived}${privateClass}" data-id="${c.id}" data-name="${escAttr(c.name)}" data-type="${c.type}">
     <span class="ch-icon">${icon}</span>
     <span class="ch-name">${esc(c.name)}</span>
     <span class="ch-count">${c.msg_count > 0 ? c.msg_count.toLocaleString() : ''}</span>
@@ -823,13 +826,14 @@ function renderSearchResults(results, headerText, onClear) {
   container.innerHTML = `<div class="results-header"><span>${headerText}</span>${clearHtml}</div>` +
     results.map(r => {
       const icon = r.channel_type === 'im' ? '@' : '#';
+      const displayText = r.snippet || r.text;
       return `<div class="search-result" data-ch="${r.channel_id}" data-ch-name="${escAttr(r.channel_name)}" data-ch-type="${r.channel_type}" data-ts="${r.ts}">
         <div class="search-result-meta">
           <span class="search-ch" data-ch="${r.channel_id}" data-ch-name="${escAttr(r.channel_name)}" data-ch-type="${r.channel_type}">${icon}${esc(r.channel_name)}</span>
           <span class="search-user" data-user-id="${r.user_id}" data-user-name="${escAttr(r.user_name)}">${esc(r.user_name)}</span>
           <span>${r.ts_display}</span>
         </div>
-        <div class="msg-text">${r.text}</div>
+        <div class="msg-text">${displayText}</div>
       </div>`;
     }).join('');
 

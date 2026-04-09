@@ -195,6 +195,10 @@ function serializeMessage(r: MsgRow, includeChannel = false, fileMap: Record<str
   return out
 }
 
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 // ── FTS query sanitizer ───────────────────────────────────────────────────────
 
 function ftsQuery(q: string): string {
@@ -221,9 +225,7 @@ function buildApp(db: DB): express.Application {
       LEFT JOIN messages m ON m.channel_id = c.id
       GROUP BY c.id
       HAVING COUNT(m.id) > 0
-      ORDER BY
-        CASE c.type WHEN 'channel' THEN 0 WHEN 'group' THEN 1 WHEN 'mpim' THEN 2 ELSE 3 END,
-        c.name
+      ORDER BY c.name COLLATE NOCASE
     `).all() as { id: string; name: string; type: string; is_archived: number; msg_count: number }[]
 
     res.json(rows.map((r) => ({
@@ -344,24 +346,30 @@ function buildApp(db: DB): express.Application {
 
     if (q.length >= 2) {
       const fts = ftsQuery(q)
+      const snippetMap = new Map<string, string>()
+
       if (fts) {
         try {
           const rows = db.prepare(`
             SELECT m.id, m.ts, m.channel_id, m.user_id, m.text,
-                   m.thread_ts, m.reply_count, m.reactions
+                   m.thread_ts, m.reply_count, m.reactions,
+                   snippet(messages_fts, 0, '\x01', '\x02', '…', 12) AS snip
             FROM messages_fts f
             JOIN messages m ON m.rowid = f.rowid
             WHERE f MATCH ?
             ORDER BY f.rank
-            LIMIT 50
-          `).all(fts) as MsgRow[]
-          for (const r of rows) if (!seen.has(r.id as string)) seen.set(r.id as string, r)
+            LIMIT 100
+          `).all(fts) as (MsgRow & { snip?: string })[]
+          for (const r of rows) {
+            if (!seen.has(r.id as string)) seen.set(r.id as string, r)
+            if (r.snip) snippetMap.set(r.id as string, r.snip as string)
+          }
         } catch (e) {
           console.error('FTS error:', e)
         }
       }
 
-      // LIKE fallback
+      // LIKE fallback (only if FTS found nothing)
       if (!seen.size) {
         const like = `%${q}%`
         const rows = db.prepare(`
@@ -370,14 +378,14 @@ function buildApp(db: DB): express.Application {
           FROM messages m
           WHERE m.text LIKE ?
             AND (m.thread_ts IS NULL OR m.thread_ts = m.ts)
-          ORDER BY m.ts DESC LIMIT 50
+          ORDER BY m.ts DESC LIMIT 100
         `).all(like) as MsgRow[]
         for (const r of rows) if (!seen.has(r.id as string)) seen.set(r.id as string, r)
       }
 
-      // User name match
+      // User name match (always run, adds to results)
       const like = `%${q}%`
-      const rows = db.prepare(`
+      const userRows = db.prepare(`
         SELECT m.id, m.ts, m.channel_id, m.user_id, m.text,
                m.thread_ts, m.reply_count, m.reactions
         FROM users u
@@ -386,14 +394,30 @@ function buildApp(db: DB): express.Application {
           AND (m.thread_ts IS NULL OR m.thread_ts = m.ts)
         ORDER BY m.ts DESC LIMIT 50
       `).all(like, like, like) as MsgRow[]
-      for (const r of rows) if (!seen.has(r.id as string)) seen.set(r.id as string, r)
+      for (const r of userRows) if (!seen.has(r.id as string)) seen.set(r.id as string, r)
+
+      // Attach snippets to results
+      for (const [id, snip] of snippetMap) {
+        const r = seen.get(id)
+        if (r) (r as MsgRow & { _snip?: string })._snip = snip
+      }
     }
 
     const results = [...seen.values()]
       .sort((a, b) => parseFloat(b.ts as string) - parseFloat(a.ts as string))
       .slice(0, 100)
 
-    res.json(results.map((r) => serializeMessage(r, true)))
+    res.json(results.map((r) => {
+      const msg = serializeMessage(r, true) as Record<string, unknown>
+      const snip = (r as MsgRow & { _snip?: string })._snip
+      if (snip) {
+        // \x01 = open highlight, \x02 = close highlight → convert to HTML
+        msg.snippet = esc(snip)
+          .replace(/\x01/g, '<mark>')
+          .replace(/\x02/g, '</mark>')
+      }
+      return msg
+    }))
   })
 
   // Serve the viewer HTML

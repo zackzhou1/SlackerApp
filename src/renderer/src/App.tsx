@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react'
 import { ProgressEvent } from '../../main/extractor'
+import { DownloadProgressEvent } from '../../main/downloader'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,19 @@ interface ExtractionState {
   error?: string
 }
 
+type DownloadPhase = 'idle' | 'scanning' | 'downloading' | 'done' | 'error'
+interface DownloadState {
+  phase: DownloadPhase
+  pending?: number
+  total?: number
+  current?: string
+  index?: number
+  downloaded?: number
+  skipped?: number
+  failed?: number
+  error?: string
+}
+
 interface SlackChannel {
   id: string
   name: string
@@ -33,6 +47,7 @@ interface SlackChannel {
 function App(): JSX.Element {
   const [auth, setAuth] = useState<AuthState>({ status: 'loading' })
   const [extraction, setExtraction] = useState<ExtractionState>({ phase: 'idle' })
+  const [download, setDownload] = useState<DownloadState>({ phase: 'idle' })
 
   useEffect(() => {
     window.api.invoke('auth:check').then((res) => {
@@ -47,6 +62,14 @@ function App(): JSX.Element {
       setExtraction((prev) => applyProgressEvent(prev, event))
     })
     return () => window.api.off('extract:progress')
+  }, [])
+
+  useEffect(() => {
+    window.api.on('files:progress', (...args) => {
+      const event = args[0] as DownloadProgressEvent
+      setDownload((prev) => applyDownloadEvent(prev, event))
+    })
+    return () => window.api.off('files:progress')
   }, [])
 
   async function handleConnect(): Promise<void> {
@@ -105,15 +128,40 @@ function App(): JSX.Element {
         <ExtractScreen
           auth={auth}
           extraction={extraction}
+          download={download}
           onConnect={handleConnect}
           onDisconnect={handleDisconnect}
           onStart={handleStart}
           onStop={() => window.api.invoke('extract:stop')}
           onOpenViewer={() => window.api.invoke('viewer:open')}
+          onStartDownload={() => {
+            setDownload({ phase: 'scanning' })
+            window.api.invoke('files:start-download').then((r) => {
+              const res = r as { error?: string }
+              if (res.error) setDownload({ phase: 'error', error: res.error })
+            })
+          }}
+          onStopDownload={() => window.api.invoke('files:stop-download')}
         />
       </div>
     </div>
   )
+}
+
+// ── Download reducer ─────────────────────────────────────────────────────────
+
+function applyDownloadEvent(prev: DownloadState, event: DownloadProgressEvent): DownloadState {
+  switch (event.type) {
+    case 'scan-done': return { ...prev, phase: 'downloading', total: event.pending, pending: event.pending, index: 0, downloaded: 0, skipped: 0, failed: 0 }
+    case 'file-start': return { ...prev, current: event.name, index: event.index }
+    case 'file-done': return { ...prev, downloaded: (prev.downloaded ?? 0) + 1 }
+    case 'file-skip': return { ...prev, skipped: (prev.skipped ?? 0) + 1 }
+    case 'file-fail': return { ...prev, failed: (prev.failed ?? 0) + 1 }
+    case 'done': return { phase: 'done', downloaded: event.downloaded, skipped: event.skipped, failed: event.failed }
+    case 'stopped': return { phase: 'idle' }
+    case 'error': return { phase: 'error', error: event.message }
+    default: return prev
+  }
 }
 
 // ── Progress reducer ──────────────────────────────────────────────────────────
@@ -144,14 +192,17 @@ function applyProgressEvent(prev: ExtractionState, event: ProgressEvent): Extrac
 interface ExtractScreenProps {
   auth: AuthState
   extraction: ExtractionState
+  download: DownloadState
   onConnect: () => void
   onDisconnect: () => void
   onStart: (opts: { channels?: string[]; noDms?: boolean }) => void
   onStop: () => void
   onOpenViewer: () => void
+  onStartDownload: () => void
+  onStopDownload: () => void
 }
 
-function ExtractScreen({ auth, extraction, onConnect, onDisconnect, onStart, onStop, onOpenViewer }: ExtractScreenProps): JSX.Element {
+function ExtractScreen({ auth, extraction, download, onConnect, onDisconnect, onStart, onStop, onOpenViewer, onStartDownload, onStopDownload }: ExtractScreenProps): JSX.Element {
   const running = ['workspace', 'users', 'channels', 'messages'].includes(extraction.phase)
 
   return (
@@ -231,6 +282,8 @@ function ExtractScreen({ auth, extraction, onConnect, onDisconnect, onStart, onS
             </div>
           )}
 
+          {extraction.phase === 'done' && <DownloadSection download={download} onStart={onStartDownload} onStop={onStopDownload} />}
+
           {extraction.phase === 'error' && (
             <div className="card card-error">
               <div className="step-badge error">Error</div>
@@ -256,10 +309,11 @@ function ChannelSelector({ onStart }: { onStart: (opts: { channels?: string[]; n
   const [includeDms, setIncludeDms] = useState(true)
   const [filter, setFilter] = useState('')
 
-  async function loadChannels(): Promise<void> {
+  async function loadChannels(refresh = false): Promise<void> {
     setLoading(true)
     setLoadError('')
     try {
+      if (refresh) await window.api.invoke('channels:refresh')
       const res = await window.api.invoke('channels:list') as { channels?: SlackChannel[]; error?: string }
       if (res.error) { setLoadError(res.error); return }
       const regular = (res.channels ?? []).filter(c => c.type === 'channel' || c.type === 'group')
@@ -322,7 +376,7 @@ function ChannelSelector({ onStart }: { onStart: (opts: { channels?: string[]; n
       {scope === 'custom' && (
         <div className="channel-picker">
           {loading && <p className="muted">Loading channels…</p>}
-          {loadError && <p className="error-text">{loadError} <button className="link-btn" onClick={loadChannels}>Retry</button></p>}
+          {loadError && <p className="error-text">{loadError} <button className="link-btn" onClick={() => loadChannels(true)}>Retry</button></p>}
 
           {!loading && channels.length > 0 && (
             <>
@@ -338,6 +392,7 @@ function ChannelSelector({ onStart }: { onStart: (opts: { channels?: string[]; n
                   <input type="checkbox" checked={allFilteredSelected} onChange={e => toggleAll(e.target.checked)} />
                   <span>{allFilteredSelected ? 'Deselect all' : 'Select all'}</span>
                 </label>
+                <button className="btn btn-ghost btn-sm" title="Refresh channel list from Slack" onClick={() => loadChannels(true)} disabled={loading}>↺</button>
               </div>
 
               <div className="channel-list-scroll">
@@ -374,6 +429,76 @@ function ChannelSelector({ onStart }: { onStart: (opts: { channels?: string[]; n
       </button>
     </div>
   )
+}
+
+// ── Download Section ──────────────────────────────────────────────────────────
+
+function DownloadSection({ download, onStart, onStop }: {
+  download: DownloadState
+  onStart: () => void
+  onStop: () => void
+}): JSX.Element {
+  const downloading = download.phase === 'scanning' || download.phase === 'downloading'
+
+  if (download.phase === 'idle') {
+    return (
+      <div className="card">
+        <div className="step-badge">Optional</div>
+        <h2>Download File Attachments</h2>
+        <p>Download images and files shared in your workspace to view them locally.</p>
+        <button className="btn btn-ghost" onClick={onStart}>Download Files →</button>
+      </div>
+    )
+  }
+
+  if (downloading) {
+    const pct = download.total && download.total > 0
+      ? Math.round(((download.index ?? 0) / download.total) * 100)
+      : 0
+    return (
+      <div className="card">
+        <div className="step-badge pulse">Downloading…</div>
+        <h2>{download.phase === 'scanning' ? 'Scanning for files…' : `Downloading files (${download.index ?? 0} / ${download.total ?? '?'})`}</h2>
+        {download.phase === 'downloading' && (
+          <>
+            <div className="progress-bar-wrap">
+              <div className="progress-bar" style={{ width: `${pct}%` }} />
+            </div>
+            {download.current && <p className="progress-label">{download.current}</p>}
+          </>
+        )}
+        <button className="btn btn-ghost" onClick={onStop}>Stop</button>
+      </div>
+    )
+  }
+
+  if (download.phase === 'done') {
+    return (
+      <div className="card card-success">
+        <div className="step-badge done">✓ Files</div>
+        <h2>Download complete</h2>
+        <div className="stats-grid">
+          <div className="stat"><span className="stat-value">{download.downloaded ?? 0}</span><span className="stat-label">downloaded</span></div>
+          <div className="stat"><span className="stat-value">{download.skipped ?? 0}</span><span className="stat-label">skipped</span></div>
+          {(download.failed ?? 0) > 0 && <div className="stat"><span className="stat-value">{download.failed}</span><span className="stat-label">failed</span></div>}
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={onStart}>Download Again</button>
+      </div>
+    )
+  }
+
+  if (download.phase === 'error') {
+    return (
+      <div className="card card-error">
+        <div className="step-badge error">Error</div>
+        <h2>Download failed</h2>
+        <p className="error-text">{download.error}</p>
+        <button className="btn btn-ghost" onClick={onStart}>Try Again</button>
+      </div>
+    )
+  }
+
+  return <></>
 }
 
 function phaseLabel(phase: ExtractionPhase): string {
