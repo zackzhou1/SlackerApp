@@ -24,9 +24,6 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts
 
-      - name: Rebuild native modules for Electron
-        run: npm run rebuild
-
       - name: Build Windows exe
         run: npm run dist:win
 
