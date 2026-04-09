@@ -131,6 +131,8 @@ function applyProgressEvent(prev: ExtractionState, event: ProgressEvent): Extrac
       return { ...prev, totalMessages: (prev.totalMessages ?? 0) + event.messages }
     case 'done':
       return { phase: 'done', stats: event.stats }
+    case 'stopped':
+      return { phase: 'idle' }
     case 'error':
       return { phase: 'error', error: event.message }
     default: return prev

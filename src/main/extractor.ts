@@ -25,6 +25,7 @@ export type ProgressEvent =
   | { type: 'channel-done'; name: string; messages: number }
   | { type: 'channel-skip'; name: string; reason: string }
   | { type: 'done'; stats: { users: number; channels: number; messages: number } }
+  | { type: 'stopped' }
   | { type: 'error'; message: string }
 
 // ── Slack HTTP client ────────────────────────────────────────────────────────
@@ -429,19 +430,19 @@ export async function runExtraction(
     const ws = await fetchWorkspace(client, db)
     emit({ type: 'workspace', name: ws.name, domain: ws.domain })
 
-    if (shouldStop()) return
+    if (shouldStop()) { emit({ type: 'stopped' }); return }
 
     // 2. Users
     const userCount = await fetchUsers(client, db)
     emit({ type: 'users', count: userCount })
 
-    if (shouldStop()) return
+    if (shouldStop()) { emit({ type: 'stopped' }); return }
 
     // 3. Channels
     const channelCount = await fetchChannels(client, db)
     emit({ type: 'channels', count: channelCount })
 
-    if (shouldStop()) return
+    if (shouldStop()) { emit({ type: 'stopped' }); return }
 
     // 4. Messages
     await fetchMessages(
@@ -450,7 +451,7 @@ export async function runExtraction(
       emit, shouldStop
     )
 
-    if (shouldStop()) return
+    if (shouldStop()) { emit({ type: 'stopped' }); return }
 
     // 5. Summary
     const stats = {
