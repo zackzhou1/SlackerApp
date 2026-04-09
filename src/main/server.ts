@@ -20,6 +20,17 @@ type ChannelEntry = { name: string; type: string }
 let userCache: Record<string, UserEntry> = {}
 let channelCache: Record<string, ChannelEntry> = {}
 
+// Result caches — cleared whenever loadCaches() runs (new extraction opened)
+let workspaceCache: { name: string; domain: string } | null = null
+let channelListCache: unknown[] | null = null
+const fileListCache = new Map<string, unknown[]>()
+
+function clearResultCaches(): void {
+  workspaceCache = null
+  channelListCache = null
+  fileListCache.clear()
+}
+
 function loadCaches(db: DB): void {
   userCache = {}
   channelCache = {}
@@ -36,6 +47,7 @@ function loadCaches(db: DB): void {
   }[]) {
     channelCache[r.id] = { name: r.name, type: r.type }
   }
+  clearResultCaches()
 }
 
 function userDisplay(uid: string): string {
@@ -238,12 +250,15 @@ function buildApp(db: DB): express.Application {
   const exApp = express()
 
   exApp.get('/api/workspace', (_req, res) => {
+    if (workspaceCache) { res.json(workspaceCache); return }
     const row = db.prepare('SELECT name, domain FROM workspaces LIMIT 1').get() as
       { name: string; domain: string } | undefined
-    res.json(row ?? { name: 'Slacker', domain: '' })
+    workspaceCache = row ?? { name: 'Slacker', domain: '' }
+    res.json(workspaceCache)
   })
 
   exApp.get('/api/channels', (_req, res) => {
+    if (channelListCache) { res.json(channelListCache); return }
     const rows = db.prepare(`
       SELECT c.id, c.name, c.type, c.is_archived, c.members, COUNT(m.id) as msg_count
       FROM channels c
@@ -261,6 +276,7 @@ function buildApp(db: DB): express.Application {
     }))
     // Sort by resolved display name (raw DB name is useless for DMs/MPIMs)
     mapped.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    channelListCache = mapped
     res.json(mapped)
   })
 
@@ -327,17 +343,20 @@ function buildApp(db: DB): express.Application {
   })
 
   exApp.get('/api/channels/:id/files', (req, res) => {
+    const { id } = req.params
+    if (fileListCache.has(id)) { res.json(fileListCache.get(id)); return }
+
     const rows = db.prepare(`
       SELECT f.id, f.name, f.title, f.mimetype, f.size,
              f.message_ts, f.local_path, f.user_id
       FROM files f WHERE f.channel_id = ?
       ORDER BY f.message_ts DESC
-    `).all(req.params.id) as {
+    `).all(id) as {
       id: string; name: string; title: string | null; mimetype: string | null
       size: number | null; message_ts: string | null; local_path: string | null; user_id: string | null
     }[]
 
-    res.json(rows.map((r) => ({
+    const result = rows.map((r) => ({
       id: r.id,
       name: r.name,
       title: r.title ?? r.name,
@@ -348,7 +367,9 @@ function buildApp(db: DB): express.Application {
       user_name: r.user_id ? userDisplay(r.user_id) : 'Unknown',
       downloaded: r.local_path !== null,
       url: r.local_path ? `/api/files/${r.id}` : null
-    })))
+    }))
+    fileListCache.set(id, result)
+    res.json(result)
   })
 
   exApp.get('/api/search', (req, res) => {
@@ -447,6 +468,12 @@ function buildApp(db: DB): express.Application {
     }))
   })
 
+  // Cache management
+  exApp.post('/api/cache/clear', (_req, res) => {
+    loadCaches(db)   // reloads user/channel lookups + clears result caches
+    res.json({ ok: true })
+  })
+
   // Serve the viewer HTML
   exApp.get('/', (_req, res) => {
     const htmlPath = electronApp.isPackaged
@@ -464,8 +491,9 @@ let httpServer: Server | null = null
 let currentDb: DB | null = null
 
 export function startViewerServer(dbPath: string): Promise<number> {
-  // If already running with same db, return existing port
-  if (httpServer) {
+  // If already running, refresh caches (extraction may have added data) and return port
+  if (httpServer && currentDb) {
+    loadCaches(currentDb)
     return Promise.resolve((httpServer.address() as AddressInfo).port)
   }
 
@@ -473,8 +501,7 @@ export function startViewerServer(dbPath: string): Promise<number> {
     const db = new Database(dbPath)
     currentDb = db
 
-    setupFts(db)
-    loadCaches(db)
+    loadCaches(db)  // fast: just SELECTs users + channels into memory
 
     const expressApp = buildApp(db)
     httpServer = createServer(expressApp)
@@ -482,7 +509,8 @@ export function startViewerServer(dbPath: string): Promise<number> {
     httpServer.listen(0, '127.0.0.1', () => {
       const port = (httpServer!.address() as AddressInfo).port
       console.log(`Viewer server started on http://127.0.0.1:${port}`)
-      resolve(port)
+      resolve(port)  // return port immediately — FTS builds in background
+      setImmediate(() => setupFts(db))  // non-blocking: search degrades gracefully until ready
     })
 
     httpServer.on('error', reject)

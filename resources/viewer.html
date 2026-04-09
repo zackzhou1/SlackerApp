@@ -423,7 +423,10 @@
 <!-- Sidebar -->
 <div id="sidebar">
   <div id="workspace-header">
-    <div id="workspace-name">Slacker</div>
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div id="workspace-name">Slacker</div>
+      <button id="refresh-btn" title="Reload channels and clear cache" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:2px 4px;line-height:1">↺</button>
+    </div>
   </div>
   <div id="search-wrap">
     <input id="search-box" type="text" placeholder="Search messages or people…" autocomplete="off">
@@ -874,10 +877,24 @@ function escAttr(s) {
 }
 
 
+// ── Refresh ──
+document.getElementById('refresh-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('refresh-btn');
+  btn.textContent = '…';
+  btn.disabled = true;
+  await fetch('/api/cache/clear', { method: 'POST' }).catch(() => {});
+  workspaceCache = null;
+  await loadChannels();
+  btn.textContent = '↺';
+  btn.disabled = false;
+});
+
 // ── Init ──
+let workspaceCache = null;
 async function init() {
   try {
     const ws = await fetch('/api/workspace').then(r => r.json());
+    workspaceCache = ws;
     if (ws?.name) {
       document.getElementById('workspace-name').textContent = ws.name;
       document.title = 'Slacker \u2014 ' + ws.name;
