@@ -1,0 +1,106 @@
+import { BrowserWindow, session as electronSession } from 'electron'
+
+export interface SlackCredentials {
+  token: string
+  cookie: string
+}
+
+/**
+ * Opens a dedicated browser window at app.slack.com.
+ * When the user finishes logging in and the workspace loads,
+ * the xoxc- token is read from localStorage and the 'd' cookie
+ * is pulled from the session — no DevTools needed.
+ *
+ * Returns null if the user closes the window before logging in.
+ */
+export async function openAuthWindow(): Promise<SlackCredentials | null> {
+  // Persistent partition keeps the user logged in across app restarts
+  const authSession = electronSession.fromPartition('persist:slack-auth')
+
+  const win = new BrowserWindow({
+    width: 960,
+    height: 720,
+    show: true,
+    autoHideMenuBar: true,
+    title: 'Sign in to Slack — Slacker',
+    webPreferences: {
+      session: authSession,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  return new Promise((resolve) => {
+    let settled = false
+
+    function settle(result: SlackCredentials | null): void {
+      if (settled) return
+      settled = true
+      if (!win.isDestroyed()) win.close()
+      resolve(result)
+    }
+
+    async function tryExtract(): Promise<boolean> {
+      try {
+        // Read xoxc- token from Slack's localStorage
+        const token: string | null = await win.webContents.executeJavaScript(`
+          (() => {
+            try {
+              const cfg = JSON.parse(localStorage.getItem('localConfig_v2') || '{}');
+              const teams = cfg.teams || {};
+              const entries = Object.entries(teams);
+              if (!entries.length) return null;
+              const team = entries[0][1];
+              const tok = team.token;
+              return (typeof tok === 'string' && tok.startsWith('xoxc-')) ? tok : null;
+            } catch (e) { return null; }
+          })()
+        `)
+
+        if (!token) return false
+
+        // Read the 'd' session cookie
+        const cookies = await authSession.cookies.get({
+          url: 'https://slack.com',
+          name: 'd'
+        })
+        const cookie = cookies[0]?.value
+        if (!cookie) return false
+
+        settle({ token, cookie })
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    // The workspace URL looks like app.slack.com/client/T.../C...
+    // That's our signal that login is complete and localStorage is populated.
+    win.webContents.on('did-navigate', async (_event, url) => {
+      if (/app\.slack\.com\/client\//.test(url)) {
+        // Retry a few times — localStorage may be populated slightly after navigation
+        for (let i = 0; i < 6; i++) {
+          const ok = await tryExtract()
+          if (ok) return
+          await delay(400)
+        }
+      }
+    })
+
+    // Also try on each page finish in case did-navigate was missed
+    win.webContents.on('did-finish-load', async () => {
+      const url = win.webContents.getURL()
+      if (/app\.slack\.com\/client\//.test(url)) {
+        await tryExtract()
+      }
+    })
+
+    win.on('closed', () => settle(null))
+
+    win.loadURL('https://app.slack.com')
+  })
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}

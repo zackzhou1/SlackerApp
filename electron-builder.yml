@@ -1,0 +1,37 @@
+appId: com.slacker.app
+productName: Slacker
+copyright: Copyright © 2025
+
+directories:
+  buildResources: build
+  output: dist
+
+files:
+  - out/**/*
+
+extraResources:
+  - from: resources/viewer.html
+    to: viewer.html
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Slacker
+
+portable:
+  artifactName: Slacker-portable.exe
+
+linux:
+  target: AppImage
+  category: Utility
