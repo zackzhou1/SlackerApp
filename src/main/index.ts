@@ -128,40 +128,51 @@ function registerIpc(): void {
     if (!creds) return { error: 'Not connected' }
 
     try {
-      const body = new URLSearchParams({
-        token: creds.token,
-        types: 'public_channel,private_channel,im,mpim',
-        exclude_archived: 'false',
-        limit: '200'
-      })
-
       const channels: { id: string; name: string; type: string }[] = []
-      let cursor: string | undefined
 
-      do {
-        if (cursor) body.set('cursor', cursor)
-        const resp = await fetch('https://slack.com/api/conversations.list', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            Cookie: `d=${creds.cookie}`
-          },
-          body: body.toString()
-        })
-        const data = await resp.json() as {
-          ok: boolean
-          channels: { id: string; name: string; is_im: boolean; is_mpim: boolean; is_private: boolean }[]
-          response_metadata?: { next_cursor?: string }
-        }
-        if (!data.ok) return { error: 'Slack API error' }
+      // Fetch public + private channels separately from DMs
+      // — some token scopes reject mixed type requests
+      for (const types of ['public_channel,private_channel', 'im,mpim']) {
+        let cursor: string | undefined
+        do {
+          const body = new URLSearchParams({
+            token: creds.token,
+            types,
+            exclude_archived: 'false',
+            limit: '200'
+          })
+          if (cursor) body.set('cursor', cursor)
 
-        for (const ch of data.channels) {
-          const type = ch.is_im ? 'im' : ch.is_mpim ? 'mpim' : ch.is_private ? 'group' : 'channel'
-          channels.push({ id: ch.id, name: ch.name || ch.id, type })
-        }
-        cursor = data.response_metadata?.next_cursor
-      } while (cursor)
+          const resp = await fetch('https://slack.com/api/conversations.list', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              Cookie: `d=${creds.cookie}`
+            },
+            body: body.toString()
+          })
+          const data = await resp.json() as {
+            ok: boolean
+            error?: string
+            channels: { id: string; name: string; is_im: boolean; is_mpim: boolean; is_private: boolean }[]
+            response_metadata?: { next_cursor?: string }
+          }
 
+          if (!data.ok) {
+            // DM listing may fail for restricted tokens — skip silently, channels already found are usable
+            console.warn(`conversations.list (${types}) error: ${data.error}`)
+            break
+          }
+
+          for (const ch of data.channels) {
+            const type = ch.is_im ? 'im' : ch.is_mpim ? 'mpim' : ch.is_private ? 'group' : 'channel'
+            channels.push({ id: ch.id, name: ch.name || ch.id, type })
+          }
+          cursor = data.response_metadata?.next_cursor
+        } while (cursor)
+      }
+
+      if (channels.length === 0) return { error: 'No channels found. Your token may have expired — try reconnecting.' }
       return { channels }
     } catch (e) {
       return { error: String(e) }
