@@ -3,3 +3,4 @@ out/
 dist/
 *.db
 *.enc
+.Zone.Identifier
