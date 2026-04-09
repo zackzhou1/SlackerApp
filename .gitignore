@@ -3,5 +3,5 @@ out/
 dist/
 *.db
 *.enc
-.Zone.Identifier
+*:Zone.Identifier
 *.png
