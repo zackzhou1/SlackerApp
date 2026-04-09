@@ -2,7 +2,7 @@ name: Build Windows
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch: # lets you trigger a build manually from the GitHub UI
 
 jobs:
