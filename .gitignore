@@ -4,3 +4,4 @@ dist/
 *.db
 *.enc
 .Zone.Identifier
+*.png
