@@ -5,17 +5,16 @@ export interface SlackCredentials {
   cookie: string
 }
 
-/**
- * Opens a dedicated browser window at app.slack.com.
- * When the user finishes logging in and the workspace loads,
- * the xoxc- token is read from localStorage and the 'd' cookie
- * is pulled from the session — no DevTools needed.
- *
- * Returns null if the user closes the window before logging in.
- */
+// Spoof a modern Chrome UA — prevents Slack's "browser not supported" warning
+// and ensures Slack serves the full web client without restrictions.
+const MODERN_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
 export async function openAuthWindow(): Promise<SlackCredentials | null> {
-  // Persistent partition keeps the user logged in across app restarts
   const authSession = electronSession.fromPartition('persist:slack-auth')
+
+  // Apply the modern UA to all requests in this session
+  authSession.setUserAgent(MODERN_UA)
 
   const win = new BrowserWindow({
     width: 960,
@@ -42,29 +41,30 @@ export async function openAuthWindow(): Promise<SlackCredentials | null> {
 
     async function tryExtract(): Promise<boolean> {
       try {
-        // Read xoxc- token from Slack's localStorage
         const token: string | null = await win.webContents.executeJavaScript(`
           (() => {
             try {
               const cfg = JSON.parse(localStorage.getItem('localConfig_v2') || '{}');
               const teams = cfg.teams || {};
-              const entries = Object.entries(teams);
-              if (!entries.length) return null;
-              const team = entries[0][1];
-              const tok = team.token;
-              return (typeof tok === 'string' && tok.startsWith('xoxc-')) ? tok : null;
+              // Try every team entry — pick the first valid xoxc- token
+              for (const team of Object.values(teams)) {
+                const tok = team.token;
+                if (typeof tok === 'string' && tok.startsWith('xoxc-')) return tok;
+              }
+              return null;
             } catch (e) { return null; }
           })()
         `)
 
         if (!token) return false
 
-        // Read the 'd' session cookie
-        const cookies = await authSession.cookies.get({
-          url: 'https://slack.com',
-          name: 'd'
-        })
-        const cookie = cookies[0]?.value
+        // The 'd' cookie is set on .slack.com — try both domains
+        let cookie: string | undefined
+        for (const url of ['https://app.slack.com', 'https://slack.com']) {
+          const cookies = await authSession.cookies.get({ url, name: 'd' })
+          cookie = cookies[0]?.value
+          if (cookie) break
+        }
         if (!cookie) return false
 
         settle({ token, cookie })
@@ -74,25 +74,25 @@ export async function openAuthWindow(): Promise<SlackCredentials | null> {
       }
     }
 
-    // The workspace URL looks like app.slack.com/client/T.../C...
-    // That's our signal that login is complete and localStorage is populated.
-    win.webContents.on('did-navigate', async (_event, url) => {
-      if (/app\.slack\.com\/client\//.test(url)) {
-        // Retry a few times — localStorage may be populated slightly after navigation
-        for (let i = 0; i < 6; i++) {
-          const ok = await tryExtract()
-          if (ok) return
-          await delay(400)
-        }
+    async function pollExtract(retries = 12, interval = 500): Promise<void> {
+      for (let i = 0; i < retries; i++) {
+        const ok = await tryExtract()
+        if (ok) return
+        await delay(interval)
       }
+    }
+
+    // Slack uses SPA navigation — watch both full navigations and in-page pushState
+    win.webContents.on('did-navigate', async (_event, url) => {
+      if (/app\.slack\.com/.test(url)) await pollExtract()
     })
 
-    // Also try on each page finish in case did-navigate was missed
+    win.webContents.on('did-navigate-in-page', async (_event, url) => {
+      if (/app\.slack\.com/.test(url)) await pollExtract(6, 400)
+    })
+
     win.webContents.on('did-finish-load', async () => {
-      const url = win.webContents.getURL()
-      if (/app\.slack\.com\/client\//.test(url)) {
-        await tryExtract()
-      }
+      if (/app\.slack\.com/.test(win.webContents.getURL())) await pollExtract(6, 400)
     })
 
     win.on('closed', () => settle(null))
