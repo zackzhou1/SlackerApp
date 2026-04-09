@@ -28,14 +28,28 @@ export type ProgressEvent =
   | { type: 'stopped' }
   | { type: 'error'; message: string }
 
+// Thrown internally when shouldStop() becomes true inside the client
+class StopError extends Error { constructor() { super('stopped') } }
+
 // ── Slack HTTP client ────────────────────────────────────────────────────────
 
 const REQUEST_DELAY = 1100 // ms — safe for all Slack API tiers
 
+// Interruptible delay — wakes every 100ms to check shouldStop
+async function interruptibleDelay(ms: number, shouldStop: () => boolean): Promise<void> {
+  const step = 100
+  let elapsed = 0
+  while (elapsed < ms && !shouldStop()) {
+    await delay(Math.min(step, ms - elapsed))
+    elapsed += step
+  }
+}
+
 class SlackClient {
   constructor(
     private token: string,
-    private cookie: string
+    private cookie: string,
+    private shouldStop: () => boolean = () => false
   ) {}
 
   async call(
@@ -43,7 +57,8 @@ class SlackClient {
     params: Record<string, string | number | boolean> = {},
     skipDelay = false
   ): Promise<Record<string, unknown>> {
-    if (!skipDelay) await delay(REQUEST_DELAY)
+    if (!skipDelay) await interruptibleDelay(REQUEST_DELAY, this.shouldStop)
+    if (this.shouldStop()) throw new StopError()
 
     const body = new URLSearchParams({ token: this.token })
     for (const [k, v] of Object.entries(params)) body.set(k, String(v))
@@ -59,7 +74,7 @@ class SlackClient {
 
     if (resp.status === 429) {
       const wait = parseInt(resp.headers.get('Retry-After') ?? '30')
-      await delay(wait * 1000)
+      await interruptibleDelay(wait * 1000, this.shouldStop)
       return this.call(method, params, true)
     }
 
@@ -424,7 +439,7 @@ export async function runExtraction(
   const db = initDb(options.dbPath)
 
   try {
-    const client = new SlackClient(options.token, options.cookie)
+    const client = new SlackClient(options.token, options.cookie, shouldStop)
 
     // 1. Workspace
     const ws = await fetchWorkspace(client, db)
@@ -460,6 +475,12 @@ export async function runExtraction(
       messages: (db.prepare('SELECT COUNT(*) as n FROM messages').get() as { n: number }).n
     }
     emit({ type: 'done', stats })
+  } catch (e) {
+    if (e instanceof StopError) {
+      emit({ type: 'stopped' })
+    } else {
+      throw e
+    }
   } finally {
     db.close()
   }

@@ -104,6 +104,11 @@ function registerIpc(): void {
 
     extractWorker.on('message', (event) => {
       mainWindow?.webContents.send('extract:progress', event)
+      const type = (event as { type: string }).type
+      if (type === 'done' || type === 'stopped' || type === 'error') {
+        extractWorker?.terminate()
+        extractWorker = null
+      }
     })
 
     extractWorker.on('error', (err) => {
