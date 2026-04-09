@@ -540,7 +540,7 @@ async function selectChannel(id, name, type) {
     el.classList.toggle('active', el.dataset.id === id);
   });
 
-  const icon = type === 'im' ? '@' : type === 'mpim' ? '◉' : type === 'group' ? '🔒' : '#';
+  const icon = type === 'im' ? '●' : type === 'mpim' ? '◉' : type === 'group' ? '⊛' : '#';
   document.getElementById('channel-title').textContent = `${icon} ${name}`;
   document.getElementById('channel-meta').textContent = '';
   document.getElementById('search-box').value = '';

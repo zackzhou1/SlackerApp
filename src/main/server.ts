@@ -42,8 +42,33 @@ function userDisplay(uid: string): string {
   return userCache[uid]?.name ?? uid ?? 'Unknown'
 }
 
-function channelDisplayName(id: string, name: string, type: string): string {
-  if (type === 'im' && name?.startsWith('U')) return userDisplay(name)
+function channelDisplayName(id: string, name: string, type: string, members?: string): string {
+  if (type === 'im') {
+    // Try members JSON first (more reliable), then fall back to name-as-user-id
+    if (members) {
+      try {
+        const ids = JSON.parse(members) as string[]
+        const other = ids.find(uid => userCache[uid])
+        if (other) return userDisplay(other)
+      } catch { /* fall through */ }
+    }
+    if (name?.match(/^[UW]/)) return userDisplay(name)
+    return name || id
+  }
+  if (type === 'mpim') {
+    // Try resolving member names from members JSON
+    if (members) {
+      try {
+        const ids = JSON.parse(members) as string[]
+        const names = ids.map(uid => userCache[uid]?.name).filter(Boolean)
+        if (names.length > 1) return names.join(', ')
+      } catch { /* fall through */ }
+    }
+    // Fallback: parse mpdm-alice--bob--charlie-1 → alice, bob, charlie
+    const stripped = name?.replace(/^mpdm-/, '').replace(/-\d+$/, '')
+    if (stripped) return stripped.split('--').join(', ')
+    return name || id
+  }
   return name || id
 }
 
@@ -220,21 +245,23 @@ function buildApp(db: DB): express.Application {
 
   exApp.get('/api/channels', (_req, res) => {
     const rows = db.prepare(`
-      SELECT c.id, c.name, c.type, c.is_archived, COUNT(m.id) as msg_count
+      SELECT c.id, c.name, c.type, c.is_archived, c.members, COUNT(m.id) as msg_count
       FROM channels c
       LEFT JOIN messages m ON m.channel_id = c.id
       GROUP BY c.id
       HAVING COUNT(m.id) > 0
-      ORDER BY c.name COLLATE NOCASE
-    `).all() as { id: string; name: string; type: string; is_archived: number; msg_count: number }[]
+    `).all() as { id: string; name: string; type: string; is_archived: number; members: string | null; msg_count: number }[]
 
-    res.json(rows.map((r) => ({
+    const mapped = rows.map((r) => ({
       id: r.id,
-      name: channelDisplayName(r.id, r.name, r.type),
+      name: channelDisplayName(r.id, r.name, r.type, r.members ?? undefined),
       type: r.type,
       is_archived: r.is_archived === 1,
       msg_count: r.msg_count
-    })))
+    }))
+    // Sort by resolved display name (raw DB name is useless for DMs/MPIMs)
+    mapped.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    res.json(mapped)
   })
 
   exApp.get('/api/channels/:id/messages', (req, res) => {
