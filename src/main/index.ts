@@ -123,6 +123,51 @@ function registerIpc(): void {
     return { ok: true }
   })
 
+  ipcMain.handle('channels:list', async () => {
+    const creds = loadCredentials()
+    if (!creds) return { error: 'Not connected' }
+
+    try {
+      const body = new URLSearchParams({
+        token: creds.token,
+        types: 'public_channel,private_channel,im,mpim',
+        exclude_archived: 'false',
+        limit: '200'
+      })
+
+      const channels: { id: string; name: string; type: string }[] = []
+      let cursor: string | undefined
+
+      do {
+        if (cursor) body.set('cursor', cursor)
+        const resp = await fetch('https://slack.com/api/conversations.list', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Cookie: `d=${creds.cookie}`
+          },
+          body: body.toString()
+        })
+        const data = await resp.json() as {
+          ok: boolean
+          channels: { id: string; name: string; is_im: boolean; is_mpim: boolean; is_private: boolean }[]
+          response_metadata?: { next_cursor?: string }
+        }
+        if (!data.ok) return { error: 'Slack API error' }
+
+        for (const ch of data.channels) {
+          const type = ch.is_im ? 'im' : ch.is_mpim ? 'mpim' : ch.is_private ? 'group' : 'channel'
+          channels.push({ id: ch.id, name: ch.name || ch.id, type })
+        }
+        cursor = data.response_metadata?.next_cursor
+      } while (cursor)
+
+      return { channels }
+    } catch (e) {
+      return { error: String(e) }
+    }
+  })
+
   // Viewer --------------------------------------------------------------------
 
   ipcMain.handle('viewer:open', async () => {
